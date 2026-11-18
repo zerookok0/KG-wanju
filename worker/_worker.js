@@ -18,7 +18,7 @@ const ONLINE_TTL_MS = 90 * 1000;
 
 const RULES = {
   targetCountries: ["KG"],
-  allowLangs: ["ru"],
+  allowLangs: ["ru", "ky", "en"],
   mobileOnly: true,
   blockAgents:
     /facebookexternalhit|Facebot|meta-externalagent|Googlebot|Google-InspectionTool|bingbot|Baiduspider|YandexBot|Twitterbot|Slackbot|TelegramBot|LinkedInBot|Pinterest|vkShare|W3C_Validator|AhrefsBot|SemrushBot|MJ12bot|DotBot|PetalBot|lighthouse|HeadlessChrome|PhantomJS|python-requests|curl\/|wget\//i
