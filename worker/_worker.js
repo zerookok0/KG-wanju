@@ -1,59 +1,16 @@
 ﻿/**
  * ┌─ worker/_worker.js ────────────────────────────────────────────
- * │ Разделение трафика (KG): обрабатываем только "/",
- * │ остальные пути уходят в статику как есть
- * │ HTML безопасной страницы встроен в этот файл — внешних путей нет
- * │
- * │ Статистика (видишь только ты):
- * │   /admin/live?token=ТОКЕН        живая панель
- * │   /api/ping                      зовёт страница, пишет онлайн
- * │   /api/stats?token=              панель забирает данные
+ * │ Кыргызстан (KG) — БЕЗ разделения трафика: настоящая страница открыта всем
+ * │ Здесь только статистика: /api/ping, /api/stats, /admin/live
  * │ Данные в Cloudflare D1 (бесплатно 100k записей/день), 90 с без пинга = офлайн
  * └───────────────────────────────────────────────────────────────
  */
 
-const BUILD = "kg-v1";
+const BUILD = "kg-v2";
 const DEFAULT_ADMIN_TOKEN = "remo-kg-2026";
 const ONLINE_TTL_MS = 90 * 1000;
 
-const RULES = {
-  targetCountries: ["KG"],
-  allowLangs: ["ru", "ky", "en"],
-  mobileOnly: true,
-  blockAgents:
-    /facebookexternalhit|Facebot|meta-externalagent|Googlebot|Google-InspectionTool|bingbot|Baiduspider|YandexBot|Twitterbot|Slackbot|TelegramBot|LinkedInBot|Pinterest|vkShare|W3C_Validator|AhrefsBot|SemrushBot|MJ12bot|DotBot|PetalBot|lighthouse|HeadlessChrome|PhantomJS|python-requests|curl\/|wget\//i
-};
-
-function isMobile(ua) {
-  return /Android|iPhone|iPad|iPod|Mobile|Windows Phone|BlackBerry|Opera Mini/i.test(ua);
-}
-
-function langOk(header) {
-  if (!header) return false;
-  const v = String(header).toLowerCase();
-  return RULES.allowLangs.some((l) => v.includes(l));
-}
-
-function decide({ ua = "", acceptLanguage = "", country = "", method = "GET",
-                  accept = "", strict = true, preview = false } = {}) {
-  if (method !== "GET" && method !== "HEAD") return { show: "page", reason: "method" };
-  if (accept && !accept.includes("text/html")) return { show: "page", reason: "non-html" };
-  if (RULES.blockAgents.test(ua)) return { show: "safe", reason: "bot" };
-  if (preview) return { show: "page", reason: "preview" };
-  if (RULES.mobileOnly && !isMobile(ua)) return { show: "safe", reason: "not-mobile" };
-  if (!langOk(acceptLanguage)) return { show: "safe", reason: "lang" };
-  if (strict) {
-    if (!country) return { show: "safe", reason: "country-unknown" };
-    if (!RULES.targetCountries.includes(country.toUpperCase())) return { show: "safe", reason: "country" };
-  }
-  return { show: "page", reason: "pass" };
-}
-
-function readCookie(header, name) {
-  if (!header) return "";
-  const m = header.match(new RegExp("(?:^|;\\s*)" + name + "=([^;]*)"));
-  return m ? decodeURIComponent(m[1]) : "";
-}
+const BOT = /facebookexternalhit|Facebot|meta-externalagent|Googlebot|Google-InspectionTool|bingbot|Baiduspider|YandexBot|Twitterbot|Slackbot|TelegramBot|LinkedInBot|Pinterest|vkShare|W3C_Validator|AhrefsBot|SemrushBot|MJ12bot|DotBot|PetalBot|lighthouse|HeadlessChrome|PhantomJS|python-requests|curl\/|wget\//i;
 
 /* ── D1：建表（首次自动） ── */
 let tableReady = false;
@@ -77,7 +34,7 @@ async function handlePing(request, env, url) {
   if (!sid) return json({ ok: false, error: "no sid" }, 400);
 
   const ua = request.headers.get("user-agent") || "";
-  if (RULES.blockAgents.test(ua)) return json({ ok: true, skipped: "bot" });
+  if (BOT.test(ua)) return json({ ok: true, skipped: "bot" });
 
   if (!DB) return json({ ok: false, error: "D1 (DB) не привязана" }, 200);
   await ensureTable(DB);
@@ -285,15 +242,13 @@ load(); setInterval(load, 5000);
 </body></html>`;
 }
 
-/* ── 主入口 ── */
+/* ── 主入口：без разделения, настоящую страницу видят все ── */
 export default {
   async fetch(request, env) {
-    const assets = env.ASSETS;
     const url = new URL(request.url);
     const path = url.pathname;
 
     try {
-      /* 后台 */
       if (path === "/api/ping") return await handlePing(request, env, url);
       if (path === "/api/stats") return await handleStats(env, url);
       if (path === "/admin/live") {
@@ -305,143 +260,13 @@ export default {
         });
       }
 
-      /* 只接管根路径 */
-      if (path !== "/") return assets.fetch(request);
-
-      const ua = request.headers.get("user-agent") || "";
-      const cookie = request.headers.get("cookie") || "";
-      const strict = String(env.SAFE_COUNTRY_STRICT ?? "1") !== "0";
-      const pv = url.searchParams.get("preview");
-      const token = env.PREVIEW_TOKEN || "";
-      const isBot = RULES.blockAgents.test(ua);
-
-      if (pv === "0") {
-        const res = await assets.fetch(request);
-        const out = new Response(res.body, res);
-        out.headers.append("Set-Cookie", "preview_ok=; Path=/; Max-Age=0; SameSite=Lax");
-        out.headers.set("X-Build", BUILD);
-        return out;
-      }
-
-      const preview =
-        !isBot &&
-        (pv === "1" || (token && pv === token) || readCookie(cookie, "preview_ok") === "1");
-
-      const verdict = decide({
-        ua,
-        acceptLanguage: request.headers.get("accept-language") || "",
-        accept: request.headers.get("accept") || "",
-        country: (request.cf && request.cf.country) || "",
-        method: request.method,
-        strict,
-        preview
-      });
-
-      /* 安全页：直接输出内嵌 HTML */
-      if (verdict.show === "safe") {
-        return new Response(SAFE_HTML, {
-          status: 200,
-          headers: {
-            "content-type": "text/html; charset=utf-8",
-            "cache-control": "public, max-age=300",
-            "x-robots-tag": "index, follow",
-            "x-cloak": verdict.reason,
-            "x-build": BUILD
-          }
-        });
-      }
-
-      const res = await assets.fetch(request);
+      /* Всё остальное отдаём статике: ни безопасной страницы, ни проверки страны/языка */
+      const res = await env.ASSETS.fetch(request);
       const out = new Response(res.body, res);
-      out.headers.set("Cache-Control", "private, no-store, max-age=0");
-      out.headers.set("Vary", "User-Agent, Accept-Language");
-      out.headers.set("X-Robots-Tag", "noindex, nofollow");
       out.headers.set("X-Build", BUILD);
-      if (verdict.reason === "preview") {
-        out.headers.set("X-Preview", "1");
-        if (pv === "1" || (token && pv === token)) {
-          out.headers.append("Set-Cookie", "preview_ok=1; Path=/; Max-Age=86400; SameSite=Lax");
-        }
-      }
       return out;
-    } catch (e) {
-      return assets.fetch(request);
+    } catch (err) {
+      return env.ASSETS.fetch(request);
     }
   }
 };
-
-export { decide, RULES, isMobile, langOk };
-
-const SAFE_HTML = `<!DOCTYPE html>
-<!--
-  ┌─ 安全页（内嵌在 worker 里，没有独立文件） ─────────────────────
-  │ 非目标国家 / 电脑 / 非俄语 / 爬虫 看到的都是这一页
-  │ 必须干净：无 18+ 表述、无下载按钮、不回链首页
-  │ 允许被搜索引擎索引（真页是 noindex）
-  └───────────────────────────────────────────────────────────────
--->
-<html lang="ru">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>РемоДива — приложение и устройство для пар</title>
-<meta name="description" content="РемоДива — сервис для пар: приложение, связанное с носимым устройством, и подбор партнёров по взаимному согласию.">
-<style>
-:root{--bg:#F6F8FB;--surface:#fff;--text:#0F1B2D;--text2:#5A6B85;--line:rgba(20,40,80,.1);--accent:#1F6FEB}
-*{box-sizing:border-box}
-body{margin:0;background:var(--bg);color:var(--text);font-family:"Inter","Noto Sans",system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;font-size:15px;line-height:1.8}
-.wrap{max-width:640px;margin:0 auto;padding:40px 20px 64px}
-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:36px}
-.logo{font-weight:700;letter-spacing:.12em}
-.logo i{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--accent);margin-right:6px;vertical-align:1px}
-h1{font-size:25px;line-height:1.45;margin:0 0 12px}
-.lead{color:var(--text2);margin:0 0 28px}
-.card{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:22px;margin-bottom:14px}
-.card h2{font-size:16px;margin:0 0 8px}
-.card p{margin:0;color:var(--text2);font-size:14px}
-.links{display:flex;gap:10px;flex-wrap:wrap;margin:28px 0}
-.links a{flex:1;min-width:200px;text-align:center;padding:14px;border-radius:12px;background:var(--accent);color:#fff;text-decoration:none;font-weight:600;font-size:14px}
-footer{border-top:1px solid var(--line);margin-top:40px;padding-top:20px;color:var(--text2);font-size:12px;line-height:2}
-footer a{color:var(--text2);margin-right:14px;display:inline-block}
-</style>
-</head>
-<body>
-<div class="wrap">
-
-  <header>
-    <div class="logo"><i></i>РемоДива</div>
-    <div style="font-size:12px;color:var(--text2);white-space:nowrap">Кыргызстан</div>
-  </header>
-
-  <h1>Даже на расстоянии<br>вы остаётесь близко.</h1>
-  <p class="lead">РемоДива — это приложение, которое работает вместе с носимым устройством, и функция подбора партнёров по обоюдному согласию. Можно общаться и постепенно сокращать дистанцию, где бы вы ни находились.</p>
-
-  <div class="card">
-    <h2>Приложение и устройство работают вместе</h2>
-    <p>Со смартфона можно настраивать работу подключённого устройства. Настройка простая, специальные знания не нужны.</p>
-  </div>
-  <div class="card">
-    <h2>Только с согласия партнёра</h2>
-    <p>Управление устройством активно лишь тогда, когда подключённый партнёр это подтвердил. Партнёр может остановить устройство в любой момент.</p>
-  </div>
-  <div class="card">
-    <h2>Общение — тоже вместе</h2>
-    <p>Во встроенном чате можно делиться тем, как прошёл день. Мы за спокойный разговор без спешки.</p>
-  </div>
-
-  <div class="links">
-    <a href="privacy.html">Политика конфиденциальности</a>
-    <a href="terms.html">Условия использования</a>
-  </div>
-
-  <footer>
-    <a href="rekvizity.html">Реквизиты продавца</a>
-    <a href="privacy.html">Политика конфиденциальности</a>
-    <a href="terms.html">Условия использования</a>
-    <p>Сервис предназначен для лиц 18 лет и старше.<br>© 2026 РемоДива. All rights reserved.</p>
-  </footer>
-
-</div>
-</body>
-</html>
-`;

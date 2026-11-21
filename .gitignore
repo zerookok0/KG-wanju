@@ -1,0 +1,17 @@
+# 构建产物（Cloudflare 会自己构建，不要提交）
+dist/
+
+# 依赖
+node_modules/
+
+# 照片原图（12 张未裁切的源文件，只在本地留着）
+_source/
+
+# 截图（本地验收用，部署用不到）
+preview/
+
+# 系统 / 临时
+.DS_Store
+Thumbs.db
+*.log
+.wrangler/
